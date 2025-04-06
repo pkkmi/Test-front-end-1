@@ -14,25 +14,34 @@ logger = logging.getLogger(__name__)
 
 # MongoDB connection
 MONGODB_URI = os.environ.get("MONGODB_URI")
+client = None
+db = None
 
+# Check if MongoDB URI is set
 if not MONGODB_URI:
-    logger.warning("MONGODB_URI environment variable not set. Database operations will fail.")
-
-try:
-    # Connect to MongoDB
-    client = MongoClient(MONGODB_URI)
-    db = client.get_database('andikar')  # Use andikar database
-    
-    # Test connection
-    db.command('ping')
-    logger.info("Successfully connected to MongoDB")
-except Exception as e:
-    logger.error(f"Failed to connect to MongoDB: {str(e)}")
-    logger.error(traceback.format_exc())
-    raise
+    logger.warning("MONGODB_URI environment variable not set. Will use fallback database.")
+else:
+    try:
+        # Connect to MongoDB
+        client = MongoClient(MONGODB_URI, serverSelectionTimeoutMS=5000)
+        db = client.get_database('andikar')  # Use andikar database
+        
+        # Test connection
+        db.command('ping')
+        logger.info("Successfully connected to MongoDB")
+    except Exception as e:
+        logger.error(f"Failed to connect to MongoDB: {str(e)}")
+        logger.error(traceback.format_exc())
+        client = None
+        db = None
+        # Note: We don't raise here - let the app.py import fallback.db
 
 def init_db():
     """Initialize database - create collections and indexes if needed."""
+    if not db:
+        logger.warning("No MongoDB connection, skipping DB initialization.")
+        return False
+        
     try:
         # Create collections if they don't exist
         if 'users' not in db.list_collection_names():
@@ -53,6 +62,10 @@ def init_db():
 
 def add_user(username, email, password_hash):
     """Add a new user to the database."""
+    if not db:
+        logger.warning("No MongoDB connection, cannot add user.")
+        return False
+        
     try:
         # Check if user already exists
         existing_user = db.users.find_one({
@@ -92,6 +105,10 @@ def add_user(username, email, password_hash):
 
 def verify_user(username, password_hash):
     """Verify user credentials."""
+    if not db:
+        logger.warning("No MongoDB connection, cannot verify user.")
+        return False
+        
     try:
         # Find user by username
         user = db.users.find_one({"username": username})
@@ -109,6 +126,10 @@ def verify_user(username, password_hash):
 
 def get_user(username):
     """Get user information by username."""
+    if not db:
+        logger.warning("No MongoDB connection, cannot get user.")
+        return None
+        
     try:
         # Find user by username
         user = db.users.find_one({"username": username})
@@ -125,6 +146,10 @@ def get_user(username):
 
 def update_user_usage(username, word_count):
     """Update user usage statistics."""
+    if not db:
+        logger.warning("No MongoDB connection, cannot update user usage.")
+        return False
+        
     try:
         # Update usage statistics
         result = db.users.update_one(
