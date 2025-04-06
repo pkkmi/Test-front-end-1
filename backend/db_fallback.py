@@ -21,20 +21,7 @@ _db_lock = threading.Lock()
 
 # Simple in-memory storage
 _collections = {
-    'users': {
-        'demo': {
-            '_id': 'demo-id',
-            'username': 'demo',
-            'email': 'demo@example.com',
-            'created_at': datetime.now(),
-            'usage': {
-                'requests': 0,
-                'total_words': 0,
-                'monthly_words': 0,
-                'last_request': None
-            }
-        }
-    }
+    'users': {}
 }
 
 # MongoDB result objects
@@ -77,7 +64,16 @@ class Collection:
             if '_id' in query and query['_id'] in self.data:
                 return self.data[query['_id']]
             
-            # Handle email query (for OAuth)
+            # Handle $or operator
+            if '$or' in query:
+                for condition in query['$or']:
+                    for field, value in condition.items():
+                        for doc_id, doc in self.data.items():
+                            if field in doc and doc[field] == value:
+                                return doc.copy()
+                return None
+            
+            # Handle email query (for auth)
             if 'email' in query:
                 email = query['email']
                 logger.info(f"Searching for email: {email}")
@@ -87,24 +83,23 @@ class Collection:
                         logger.info(f"Found user by email: {email}")
                         return doc.copy()  # Return a copy to avoid modification issues
             
-            # Handle Google ID query (for OAuth)
-            if 'google_id' in query:
-                google_id = query['google_id']
-                logger.info(f"Searching for google_id: {google_id}")
-                for doc_id, doc in self.data.items():
-                    if doc.get('google_id') == google_id:
-                        logger.info(f"Found user by google_id: {google_id}")
-                        return doc.copy()  # Return a copy to avoid modification issues
-                    
             # Handle username query
             if 'username' in query:
                 username = query['username']
                 if username in self.data:
                     logger.info(f"Found user by username: {username}")
                     return self.data[username].copy()  # Return a copy to avoid modification issues
+                for doc_id, doc in self.data.items():
+                    if doc.get('username') == username:
+                        return doc.copy()
             
             logger.info(f"No match found for query: {query}")
             return None
+    
+    def create_index(self, field_name, unique=False, sparse=False):
+        """Create an index (simulated)"""
+        logger.info(f"Creating index on {self.name}.{field_name} (unique={unique}, sparse={sparse})")
+        return field_name
     
     def insert_one(self, document):
         """Insert a single document with retry logic"""
@@ -115,14 +110,9 @@ class Collection:
             if '_id' not in document:
                 document['_id'] = str(uuid.uuid4())
                 
-            # For user documents, use username or email as key
-            if self.name == 'users':
-                if 'email' in document:
-                    username = document.get('username') or document.get('email').split('@')[0]
-                    document['username'] = username  # Ensure username is set
-                    doc_id = username
-                else:
-                    doc_id = document['_id']
+            # For user documents, use username as key
+            if self.name == 'users' and 'username' in document:
+                doc_id = document['username']
             else:
                 doc_id = document['_id']
                 
@@ -145,8 +135,8 @@ class Collection:
                 return UpdateResult(0, 0)
                 
             # Get the document ID
-            if self.name == 'users':
-                doc_id = doc_to_update.get('username') or doc_to_update.get('email').split('@')[0]
+            if self.name == 'users' and 'username' in doc_to_update:
+                doc_id = doc_to_update['username']
             else:
                 doc_id = doc_to_update['_id']
                 
@@ -228,6 +218,23 @@ db = MockDB()
 def init_db():
     """Initialize the in-memory database."""
     logger.info("Initializing fallback database")
+    # Create test user
+    users = Collection('users')
+    if not users.find_one({"username": "demo"}):
+        users.insert_one({
+            "_id": "demo-id",
+            "username": "demo",
+            "email": "demo@example.com",
+            "password_hash": "5f4dcc3b5aa765d61d8327deb882cf99",  # "password"
+            "password_salt": "demo-salt",
+            "created_at": datetime.now(),
+            "usage": {
+                "requests": 0,
+                "total_words": 0,
+                "monthly_words": 0,
+                "last_request": None
+            }
+        })
     return True
 
 def add_user(username, email, password_hash):
