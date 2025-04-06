@@ -19,6 +19,9 @@ from flask import url_for, session, redirect, request
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
+# Cache for user lookups to speed up authentication
+user_cache = {}
+
 def init_auth(app, db):
     """Initialize authentication module"""
     logger.info("Initializing auth module")
@@ -32,7 +35,6 @@ def init_auth(app, db):
         return True
     except Exception as e:
         logger.error(f"Error initializing auth module: {str(e)}")
-        logger.error(traceback.format_exc())
         return False
 
 def hash_password(password, salt=None):
@@ -66,19 +68,15 @@ def register_user(db, username, email, password, phone=None):
     """Register a new user with username, email, and password"""
     # Validate inputs
     if not username or not email or not password:
-        logger.warning("Registration failed: Missing required fields")
         return False, "All fields are required"
     
     if not validate_email(email):
-        logger.warning(f"Registration failed: Invalid email format - {email}")
         return False, "Invalid email format"
     
     if phone and not validate_phone(phone):
-        logger.warning(f"Registration failed: Invalid phone format - {phone}")
         return False, "Invalid phone number format"
     
     if len(password) < 8:
-        logger.warning("Registration failed: Password too short")
         return False, "Password must be at least 8 characters"
     
     # Check if username or email already exists
@@ -91,10 +89,8 @@ def register_user(db, username, email, password, phone=None):
         
         if existing_user:
             if existing_user.get('email') == email:
-                logger.warning(f"Registration failed: Email already exists - {email}")
                 return False, "Email already registered"
             else:
-                logger.warning(f"Registration failed: Username already exists - {username}")
                 return False, "Username already taken"
         
         # Hash password
@@ -130,12 +126,21 @@ def register_user(db, username, email, password, phone=None):
             
     except Exception as e:
         logger.error(f"Error during registration: {str(e)}")
-        logger.error(traceback.format_exc())
         return False, "Registration failed: Internal error"
 
 def login_user(db, email_or_username, password):
-    """Login a user with email/username and password"""
+    """Login a user with email/username and password - optimized version"""
     try:
+        # First check if we have this user in cache
+        cache_key = f"login:{email_or_username}"
+        cached_user = user_cache.get(cache_key)
+        
+        if cached_user and validate_password(password, cached_user['password_hash'], cached_user['password_salt']):
+            # Update last login time in background later
+            logger.info(f"User found in cache and logged in: {cached_user['username']}")
+            return cached_user, "Login successful"
+        
+        # If not in cache or password doesn't match, try database
         users_collection = db['users']
         
         # Find user by email or username
@@ -161,20 +166,33 @@ def login_user(db, email_or_username, password):
             {"$set": {"last_login": datetime.now()}}
         )
         
+        # Cache the user for future logins
+        user_cache[cache_key] = user
+        user_cache[f"user:{user['username']}"] = user
+        
         # Return user info
         logger.info(f"User logged in successfully: {user['username']}")
         return user, "Login successful"
         
     except Exception as e:
         logger.error(f"Error during login: {str(e)}")
-        logger.error(traceback.format_exc())
         return None, "Login failed: Internal error"
 
 def get_user_by_id(db, user_id):
-    """Get user information by user ID"""
+    """Get user information by user ID - optimized with caching"""
+    # Check cache first
+    cache_key = f"user:{user_id}"
+    if cache_key in user_cache:
+        return user_cache[cache_key]
+    
     try:
         users_collection = db['users']
         user = users_collection.find_one({"username": user_id})
+        
+        # Cache the result
+        if user:
+            user_cache[cache_key] = user
+        
         return user
     except Exception as e:
         logger.error(f"Error getting user: {str(e)}")
@@ -184,7 +202,7 @@ def update_user_password(db, user_id, current_password, new_password):
     """Update user password"""
     try:
         users_collection = db['users']
-        user = users_collection.find_one({"username": user_id})
+        user = get_user_by_id(db, user_id)
         
         if not user:
             return False, "User not found"
@@ -210,6 +228,11 @@ def update_user_password(db, user_id, current_password, new_password):
         )
         
         if result.modified_count > 0:
+            # Update cache
+            user['password_hash'] = new_hash
+            user['password_salt'] = new_salt
+            user_cache[f"user:{user_id}"] = user
+            
             return True, "Password updated successfully"
         else:
             return False, "Failed to update password"
@@ -252,6 +275,12 @@ def update_user_profile(db, user_id, email=None, phone=None):
         )
         
         if result.modified_count > 0:
+            # Update cache if user is cached
+            cache_key = f"user:{user_id}"
+            if cache_key in user_cache:
+                for key, value in update_doc.items():
+                    user_cache[cache_key][key] = value
+            
             return True, "Profile updated successfully"
         else:
             return False, "No changes made"
@@ -259,3 +288,16 @@ def update_user_profile(db, user_id, email=None, phone=None):
     except Exception as e:
         logger.error(f"Error updating profile: {str(e)}")
         return False, "Failed to update profile: Internal error"
+
+# Initialize the demo user in cache
+def init_demo_user(db):
+    """Initialize the demo user in cache for faster login"""
+    try:
+        users_collection = db['users']
+        demo_user = users_collection.find_one({"username": "demo"})
+        if demo_user:
+            user_cache["login:demo"] = demo_user
+            user_cache["user:demo"] = demo_user
+            logger.info("Demo user cached for faster login")
+    except Exception as e:
+        logger.error(f"Error caching demo user: {str(e)}")
