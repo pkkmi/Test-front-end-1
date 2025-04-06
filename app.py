@@ -45,7 +45,9 @@ try:
         from backend.db_fallback import client, db
         using_fallback_db = True
     
-    from backend.oauth import get_google_auth_url, get_google_tokens, get_google_user_info, get_or_create_user
+    # Import manual authentication module
+    from backend.auth import init_auth, register_user, login_user, get_user_by_id
+    from backend.auth import update_user_password, update_user_profile
     
     # Import support bot module
     from support_bot import register_support_bot
@@ -64,14 +66,13 @@ app.config['PERMANENT_SESSION_LIFETIME'] = timedelta(days=7)
 env_vars = {k: (v[:5] + "..." + v[-5:] if len(v) > 15 else "***") for k, v in os.environ.items()}
 logger.info(f"Environment variables (redacted): {env_vars}")
 
-# Add environment variable info to session for debugging
-app.config['GOOGLE_CLIENT_ID'] = os.environ.get("GOOGLE_CLIENT_ID", "934412857118-i13t5ma9afueo40tmohosprsjf4555f0.apps.googleusercontent.com")
-app.config['GOOGLE_CLIENT_SECRET_SET'] = bool(os.environ.get("GOOGLE_CLIENT_SECRET"))
-logger.info(f"Google Client ID: {app.config['GOOGLE_CLIENT_ID'][:5]}...{app.config['GOOGLE_CLIENT_ID'][-5:]}")
-logger.info(f"Google Client Secret is set: {app.config['GOOGLE_CLIENT_SECRET_SET']}")
+# Configure MongoDB connection
+app.config['MONGODB_URI'] = os.environ.get("MONGODB_URI")
+logger.info(f"MongoDB URI is set: {bool(app.config['MONGODB_URI'])}")
 
-# Initialize database
+# Initialize database and auth
 init_db()
+init_auth(app, db)
 
 # Register support bot blueprint
 register_support_bot(app)
@@ -109,117 +110,90 @@ def index():
 @app.route('/register', methods=['GET', 'POST'])
 def register():
     """Handle user registration."""
-    # Redirect to Google OAuth login
-    return redirect(url_for('login'))
-
-@app.route('/login', methods=['GET', 'POST'])
-def login():
-    """Handle user login - redirect to Google OAuth."""
     # If user is already logged in, redirect to humanize
     if 'user_id' in session:
         return redirect(url_for('humanize'))
         
-    # Add OAuth config info to session for debugging
-    session['google_client_id'] = app.config['GOOGLE_CLIENT_ID']
-    session['google_client_secret'] = app.config['GOOGLE_CLIENT_SECRET_SET']
-    session.permanent = True  # Make session persistent
+    if request.method == 'POST':
+        # Get form data
+        username = request.form.get('username')
+        email = request.form.get('email')
+        phone = request.form.get('phone')
+        password = request.form.get('password')
+        confirm_password = request.form.get('confirm_password')
+        
+        # Validate data
+        if not username or not email or not password:
+            flash('All required fields must be filled out.', 'danger')
+            return render_template('register.html')
+            
+        if password != confirm_password:
+            flash('Passwords do not match.', 'danger')
+            return render_template('register.html')
+            
+        # Try to register the user
+        success, message = register_user(db, username, email, password, phone)
+        
+        if success:
+            flash(message, 'success')
+            return redirect(url_for('login'))
+        else:
+            flash(message, 'danger')
+            return render_template('register.html')
     
-    # Generate Google OAuth URL
-    google_auth_url = get_google_auth_url(url_for('callback', _external=True))
-    
-    if not google_auth_url:
-        flash('Error configuring Google login. Please try again later.', 'danger')
-        logger.error("Failed to generate Google auth URL")
-        return redirect(url_for('index'))
-    
-    logger.info(f"Generated Google auth URL: {google_auth_url[:50]}...")
-    
-    # Special handling for Edge browser
-    is_edge = session.get('is_edge_browser', False)
-    
-    # Create response for template 
-    response = make_response(render_template('login.html', google_auth_url=google_auth_url))
-    
-    # For Edge browser, add cache-control headers
-    if is_edge:
-        response.headers['Cache-Control'] = 'no-store, no-cache, must-revalidate, post-check=0, pre-check=0, max-age=0'
-        response.headers['Pragma'] = 'no-cache'
-        response.headers['Expires'] = '-1'
-    
-    return response
+    # GET request - show registration form
+    return render_template('register.html')
 
-@app.route('/callback')
-def callback():
-    """Handle the OAuth callback from Google."""
-    # Log all request details for debugging
-    logger.info(f"Callback received - Full URL: {request.url}")
-    logger.info(f"Request args: {request.args}")
+@app.route('/login', methods=['GET', 'POST'])
+def login():
+    """Handle user login."""
+    # If user is already logged in, redirect to humanize
+    if 'user_id' in session:
+        return redirect(url_for('humanize'))
     
-    # Get authorization code from request
-    code = request.args.get('code')
-    error = request.args.get('error')
+    if request.method == 'POST':
+        # Get form data
+        email_or_username = request.form.get('email_or_username')
+        password = request.form.get('password')
+        remember_me = 'remember_me' in request.form
+        
+        # Validate input
+        if not email_or_username or not password:
+            flash('Please enter both email/username and password.', 'danger')
+            return render_template('login.html')
+        
+        # Try to login
+        user, message = login_user(db, email_or_username, password)
+        
+        if user:
+            # Login successful - set session variables
+            session['user_id'] = user['username']
+            session['user_email'] = user['email']
+            session['user_picture'] = user.get('profile_picture', '')
+            
+            # Set session to permanent if remember_me is checked
+            if remember_me:
+                session.permanent = True
+            
+            flash(f'Welcome back, {user["username"]}!', 'success')
+            
+            # Create response for redirect
+            response = make_response(redirect(url_for('humanize')))
+            
+            # For Edge browser, add cache-control headers
+            is_edge = session.get('is_edge_browser', False)
+            if is_edge:
+                response.headers['Cache-Control'] = 'no-store, no-cache, must-revalidate, post-check=0, pre-check=0, max-age=0'
+                response.headers['Pragma'] = 'no-cache'
+                response.headers['Expires'] = '-1'
+            
+            return response
+        else:
+            flash(message, 'danger')
+            return render_template('login.html')
     
-    logger.info(f"Callback received - code exists: {bool(code)}, error: {error}")
-    
-    if error:
-        flash(f'Authentication error: {error}. Please try again.', 'danger')
-        logger.error(f"OAuth error returned: {error}")
-        return redirect(url_for('login'))
-    
-    if not code:
-        flash('Authentication failed. Please try again.', 'danger')
-        logger.error("No authorization code in callback")
-        return redirect(url_for('login'))
-    
-    # Exchange code for tokens
-    logger.info(f"Exchanging code for tokens...")
-    tokens = get_google_tokens(code, url_for('callback', _external=True))
-    
-    if not tokens:
-        flash('Failed to authenticate with Google. Please try again.', 'danger')
-        logger.error("Failed to get tokens from Google OAuth")
-        return redirect(url_for('login'))
-    
-    # Get user info from Google
-    logger.info(f"Getting user info from Google...")
-    user_info = get_google_user_info(tokens)
-    
-    if not user_info:
-        flash('Failed to retrieve your information from Google. Please ensure your email is verified.', 'danger')
-        logger.error("Failed to get user info from Google")
-        return redirect(url_for('login'))
-    
-    # Get or create user in our database
-    logger.info(f"Getting or creating user in database...")
-    user = get_or_create_user(db, user_info)
-    
-    if not user:
-        flash('Failed to create or find your user account. Please try again.', 'danger')
-        logger.error("Failed to get or create user in database")
-        return redirect(url_for('login'))
-    
-    # Set session variables
-    session['user_id'] = user['username']
-    session['user_email'] = user['email']
-    session['user_picture'] = user.get('profile_picture', '')
-    session.permanent = True  # Make session persistent
-    
-    logger.info(f"User logged in successfully: {user['username']}")
-    
-    # Success message
-    flash(f'Welcome, {user["username"]}!', 'success')
-    
-    # Create response for redirect
-    response = make_response(redirect(url_for('humanize')))
-    
-    # For Edge browser, add cache-control headers
-    is_edge = session.get('is_edge_browser', False)
-    if is_edge:
-        response.headers['Cache-Control'] = 'no-store, no-cache, must-revalidate, post-check=0, pre-check=0, max-age=0'
-        response.headers['Pragma'] = 'no-cache'
-        response.headers['Expires'] = '-1'
-    
-    return response
+    # GET request - show login form
+    return render_template('login.html')
 
 @app.route('/logout', methods=['GET', 'POST'])
 def logout():
@@ -239,7 +213,7 @@ def dashboard():
     
     # Get user info
     user_id = session['user_id']
-    user = get_user(user_id)
+    user = get_user_by_id(db, user_id)
     
     # Render dashboard template with user info
     return render_template('dashboard.html', 
@@ -256,10 +230,65 @@ def account():
     
     # Get user info
     user_id = session['user_id']
-    user = get_user(user_id)
+    user = get_user_by_id(db, user_id)
     
     # Render account template with user info
     return render_template('account.html', user=user)
+
+@app.route('/update_profile', methods=['POST'])
+def update_profile():
+    """Handle user profile updates."""
+    # Check if user is logged in
+    if 'user_id' not in session:
+        flash('Please log in to update your profile', 'warning')
+        return redirect(url_for('login'))
+    
+    # Get user ID and form data
+    user_id = session['user_id']
+    email = request.form.get('email')
+    phone = request.form.get('phone')
+    
+    # Update profile
+    success, message = update_user_profile(db, user_id, email, phone)
+    
+    if success:
+        flash(message, 'success')
+        # Update session email if it changed
+        if email:
+            session['user_email'] = email
+    else:
+        flash(message, 'danger')
+    
+    return redirect(url_for('account'))
+
+@app.route('/change_password', methods=['POST'])
+def change_password():
+    """Handle password changes."""
+    # Check if user is logged in
+    if 'user_id' not in session:
+        flash('Please log in to change your password', 'warning')
+        return redirect(url_for('login'))
+    
+    # Get user ID and form data
+    user_id = session['user_id']
+    current_password = request.form.get('current_password')
+    new_password = request.form.get('new_password')
+    confirm_new_password = request.form.get('confirm_new_password')
+    
+    # Validate input
+    if not current_password or not new_password or not confirm_new_password:
+        flash('All password fields are required.', 'danger')
+        return redirect(url_for('account'))
+    
+    if new_password != confirm_new_password:
+        flash('New passwords do not match.', 'danger')
+        return redirect(url_for('account'))
+    
+    # Update password
+    success, message = update_user_password(db, user_id, current_password, new_password)
+    
+    flash(message, 'success' if success else 'danger')
+    return redirect(url_for('account'))
 
 @app.route('/humanize', methods=['GET', 'POST'])
 def humanize():
@@ -415,7 +444,7 @@ def debug():
     user_info = None
     if 'user_id' in session:
         user_id = session['user_id']
-        user = get_user(user_id)
+        user = get_user_by_id(db, user_id)
         if user:
             user_info = {
                 'username': user.get('username', user_id),
@@ -437,14 +466,14 @@ def debug():
         "RAILWAY_STATIC_URL": os.environ.get("RAILWAY_STATIC_URL", "Not set"),
         "PORT": os.environ.get("PORT", "Not set"),
         "NIXPACKS_PYTHON_VERSION": os.environ.get("NIXPACKS_PYTHON_VERSION", "Not set"),
-        "GOOGLE_CLIENT_SECRET_SET": bool(os.environ.get("GOOGLE_CLIENT_SECRET")),
+        "MONGODB_URI_SET": bool(os.environ.get("MONGODB_URI")),
         "DEPLOYMENT_ID": os.environ.get("RAILWAY_DEPLOYMENT_ID", "Not set")[:8] + "...",
         "GIT_COMMIT": os.environ.get("RAILWAY_GIT_COMMIT_SHA", "Not set")[:8] + "..."
     }
     
     # File status
     file_status = {}
-    for path in ["/app/app.py", "/app/backend/db_fallback.py", "/app/backend/oauth.py"]:
+    for path in ["/app/app.py", "/app/backend/db_fallback.py", "/app/backend/auth.py"]:
         if os.path.exists(path):
             size = os.path.getsize(path)
             mtime = datetime.fromtimestamp(os.path.getmtime(path))
@@ -469,7 +498,7 @@ def health_check():
         "timestamp": datetime.now().isoformat(),
         "db_connection": "fallback" if using_fallback_db else "mongodb",
         "api_status": get_api_status().get('status', 'unknown'),
-        "oauth_configured": bool(os.environ.get("GOOGLE_CLIENT_SECRET")),
+        "mongodb_configured": bool(os.environ.get("MONGODB_URI")),
         "environment": os.environ.get("RAILWAY_ENVIRONMENT", "unknown"),
         "deployment_id": os.environ.get("RAILWAY_DEPLOYMENT_ID", "unknown")[:8] + "...",
         "git_commit": os.environ.get("RAILWAY_GIT_COMMIT_SHA", "unknown")[:8] + "..."
