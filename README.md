@@ -1,117 +1,71 @@
-# Andikar AI - Text Humanizer
+# Andikar AI - Manual Authentication Version
 
-Andikar AI is a web application that transforms AI-generated content into natural human text. 
+This is a variant of the original Andikar AI application that uses manual registration and authentication instead of Google OAuth. Users can register with username, email, password, and optional phone number.
 
 ## Features
 
-- Text humanization: Convert AI-generated text into more natural, human-like writing
-- AI detection: Analyze text to determine the likelihood it was written by AI
-- User dashboard: Track usage and access personal account settings
-- Google authentication: Securely log in with Google accounts
+- **Manual User Registration**: Create accounts with username, email, and password
+- **Secure Password Handling**: Passwords are securely hashed and salted
+- **User Profile Management**: Update email, phone, and password
+- **MongoDB Integration**: User data is stored in MongoDB
+- **Fallback Database**: In-memory storage when MongoDB is unavailable
+- **Edge Browser Compatibility**: Special handling for Microsoft Edge
+- **Text Humanization**: Uses the Andikar AI backend to humanize text
 
-## Recent Updates
+## Getting Started
 
-- **Authentication Flow**: Users must now log in to access the humanize feature
-- **Navigation Priority**: Humanize page is now the primary landing page after login
-- **Google OAuth**: Authentication system now uses Google accounts
+### Prerequisites
 
-## Environment Setup
+- Python 3.9+
+- MongoDB (or the fallback in-memory database will be used)
 
-1. Copy `.env.example` to `.env` in the root directory
-2. Generate a secure random key for `SECRET_KEY`:
-   ```bash
-   python -c "import secrets; print(secrets.token_hex(24))"
+### Environment Variables
+
+Set the following environment variables:
+
+- `MONGODB_URI` - MongoDB connection string
+- `SECRET_KEY` - Secret key for session security (optional)
+- `PORT` - Port to run the application on (default: 5000)
+
+### Installation
+
+1. Clone the repository
+2. Install dependencies:
    ```
-3. Set up your MongoDB connection string in `MONGODB_URI`
-4. Set up Google OAuth credentials (instructions below)
-
-## Google OAuth Setup
-
-### Create Google Cloud Project
-1. Go to the [Google Cloud Console](https://console.cloud.google.com/)
-2. Create a new project
-3. Navigate to "APIs & Services" > "OAuth consent screen"
-4. Configure the consent screen (External user type recommended)
-5. Add scopes: `email`, `profile`, `openid`
-6. Add test users if needed
-
-### Configure OAuth Credentials
-1. Go to "APIs & Services" > "Credentials"
-2. Create OAuth 2.0 Client ID (Web application)
-3. Add authorized JavaScript origins:
-   - `http://localhost:5000` (for development)
-   - Your production domain (e.g., `https://yourdomain.com`)
-4. Add authorized redirect URIs:
-   - `http://localhost:5000/callback` (for development)
-   - Your production callback URL (e.g., `https://yourdomain.com/callback`)
-5. Note your Client ID and Client Secret
-6. Update your `.env` file with these credentials
-
-## Running Locally
-
-```bash
-# Clone the repository
-git clone https://github.com/pkkmi/Test-front-end.git
-cd Test-front-end
-
-# Create and activate virtual environment
-python -m venv venv
-source venv/bin/activate  # On Windows: venv\Scripts\activate
-
-# Install dependencies
-pip install -r requirements.txt
-
-# Set up environment variables
-# Copy .env.example to .env and update values
-
-# Run the application
-flask run
-```
-
-Visit `http://localhost:5000` in your web browser.
+   pip install -r requirements.txt
+   ```
+3. Run the application:
+   ```
+   python app.py
+   ```
 
 ## Deployment
 
-### Heroku Deployment
-```bash
-# Install Heroku CLI if not already installed
-# Login to Heroku
-heroku login
+The application can be deployed on Railway or any other platform that supports Python applications.
 
-# Create a new Heroku app
-heroku create andikar-ai
+### Railway Deployment
 
-# Set environment variables
-heroku config:set FLASK_APP=app.py
-heroku config:set FLASK_ENV=production
-heroku config:set SECRET_KEY=your_generated_secret_key
-heroku config:set MONGODB_URI=your_mongodb_connection_string
-heroku config:set DB_NAME=andikar_ai
-heroku config:set GOOGLE_CLIENT_ID=your_google_client_id
-heroku config:set GOOGLE_CLIENT_SECRET=your_google_client_secret
+1. Connect your GitHub repository to Railway
+2. Add environment variables in Railway dashboard
+3. Deploy the application
 
-# Deploy to Heroku
-git push heroku main
+## API Integration
 
-# Open the app
-heroku open
-```
+The application connects to the Andikar AI API for text humanization. The API provides:
 
-### AWS Deployment
-1. Set up an EC2 instance with Python installed
-2. Clone the repository to the server
-3. Set up a virtual environment and install dependencies
-4. Configure environment variables
-5. Set up Nginx as a reverse proxy
-6. Use Gunicorn as a WSGI server
-7. Configure systemd to manage the application process
+- Text humanization
+- Word count
+- AI detection
 
-## Troubleshooting
+## Differences from the Original Version
 
-If you encounter any issues with the Google OAuth integration, check:
-1. The client ID and secret are correctly set in your environment variables
-2. The authorized redirect URIs match your application's callback URL
-3. The OAuth consent screen is properly configured
-4. Your Google Cloud project APIs are enabled
+This version differs from the original Test-front-end in the following ways:
 
-If needed, you can roll back to the previous authentication system by restoring from backup files.
+1. Uses manual registration instead of Google OAuth
+2. Requires direct MongoDB configuration (no Google authentication)
+3. Includes user profile management features
+4. Has additional security features for password handling
+
+## Support
+
+For any issues or questions, please contact the Andikar AI team.
