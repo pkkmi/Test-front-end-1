@@ -1,47 +1,37 @@
-# Setting up Environment Variables in Railway
+# Railway Environment Variables
 
-## CRITICAL: Your Google OAuth is failing because the client secret is not set
+For proper deployment on Railway, set the following environment variables:
 
-The logs clearly show that your Google client secret is not properly configured in Railway:
-```
-Google Client Secret is set: False
-```
+## Required Variables
 
-## Step-by-Step Instructions for Setting Environment Variables
+| Variable     | Description                                    | Example                                  |
+|--------------|------------------------------------------------|------------------------------------------|
+| MONGODB_URI  | MongoDB connection string                      | mongodb+srv://user:pass@cluster.mongodb.net/andikar |
+| SECRET_KEY   | Secret key for sessions (generate a random one)| a1b2c3d4e5f6g7h8i9j0                    |
 
-1. Go to your Railway dashboard: https://railway.app/dashboard
-2. Select your project (Test-front-end or Andikar AI)
-3. Click on the "Variables" tab in the top navigation
-4. Click the "New Variable" button
-5. Add the following variable:
-   - **KEY:** `GOOGLE_CLIENT_SECRET`
-   - **VALUE:** `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`
-6. Click "Add" to save the variable
+## Optional Variables
 
-## Verifying the Variable is Set
+| Variable | Description                      | Default   |
+|----------|----------------------------------|-----------|
+| PORT     | Port to run the application on   | 8080      |
 
-1. After adding the variable, Railway will automatically trigger a new deployment
-2. Wait for the deployment to complete (usually 1-3 minutes)
-3. Once deployed, try logging in again
-4. If issues persist, check the `/debug` endpoint on your application
+## How to set up
 
-## Common Mistakes to Avoid
+1. Go to your Railway dashboard
+2. Select your project
+3. Click on the "Variables" tab
+4. Add each variable with its corresponding value
 
-- **Typos in the variable name:** Make sure it's exactly `GOOGLE_CLIENT_SECRET` (case-sensitive)
-- **Extra spaces:** Ensure there are no leading or trailing spaces in the value
-- **Quotes:** Do not include quotation marks around the value
-- **Project selection:** Make sure you're adding the variable to the correct Railway project
+## Notes
 
-## Environment Variables That Should Be Set
+- **Security**: Keep your MongoDB connection string private
+- **Performance**: The application will use an in-memory fallback database if MongoDB is not configured, but this is not recommended for production use.
+- **Error Handling**: Check the logs if you encounter any issues with database connections
 
-| Variable Name | Description | Status |
-|---------------|-------------|--------|
-| GOOGLE_CLIENT_SECRET | Google OAuth client secret | ❌ Not set |
-| MONGODB_URI | MongoDB connection string (optional) | ⚠️ Optional |
-| SECRET_KEY | Flask session encryption key | ✅ Auto-generated |
+## Testing MongoDB Connection
 
-## Quick Verification Script
+To confirm your MongoDB connection is working:
 
-To verify if environment variables are set correctly, Railway has a "Variables" tab that shows all currently set variables. You can also see logs in the "Deployments" tab that will show if variables are properly loaded.
-
-![Railway Variables Interface](https://railway.app/brand/logo-light.svg)
+1. Deploy your application after setting the variables
+2. Visit `/debug` endpoint
+3. Verify that the db_status field shows "Using MongoDB" instead of "Using fallback in-memory database"
