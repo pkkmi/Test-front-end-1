@@ -1,170 +1,261 @@
 """
-Authentication Module
-Handles user authentication, JWT token generation/validation,
-and user session management
+Manual Authentication Module
+
+Provides user registration, login, and authentication functionality
+without relying on Google OAuth.
 """
 
 import os
-import jwt
-import datetime
-from functools import wraps
-from flask import request, jsonify, current_app, g, session
-from werkzeug.security import generate_password_hash, check_password_hash
-from dotenv import load_dotenv
+import logging
+import time
+from datetime import datetime
+import re
+import hashlib
+import secrets
+import traceback
+from flask import url_for, session, redirect, request
 
-# Import the user database
-from models import users_db
+# Configure logging
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
-load_dotenv()
-
-# JWT configuration
-JWT_SECRET = os.getenv('JWT_SECRET', 'dev-secret-key')
-JWT_EXPIRATION = int(os.getenv('JWT_EXPIRATION', 3600))  # 1 hour by default
-
-# User session store (replace with database in production)
-active_sessions = {}
-
-def generate_token(user_id, account_type):
-    """Generate a JWT token for the authenticated user"""
-    payload = {
-        'exp': datetime.datetime.utcnow() + datetime.timedelta(seconds=JWT_EXPIRATION),
-        'iat': datetime.datetime.utcnow(),
-        'sub': user_id,
-        'account_type': account_type
-    }
-    return jwt.encode(
-        payload,
-        JWT_SECRET,
-        algorithm='HS256'
-    )
-
-def decode_token(token):
-    """Decode and validate a JWT token"""
+def init_auth(app, db):
+    """Initialize authentication module"""
+    logger.info("Initializing auth module")
+    # Create collections and indexes if needed
     try:
-        payload = jwt.decode(
-            token,
-            JWT_SECRET,
-            algorithms=['HS256']
-        )
-        return payload
-    except jwt.ExpiredSignatureError:
-        return None  # Token has expired
-    except jwt.InvalidTokenError:
-        return None  # Invalid token
+        # Ensure user collection has required indexes
+        db['users'].create_index("email", unique=True)
+        db['users'].create_index("username", unique=True)
+        db['users'].create_index("phone", sparse=True)
+        logger.info("Auth module initialized successfully")
+        return True
+    except Exception as e:
+        logger.error(f"Error initializing auth module: {str(e)}")
+        logger.error(traceback.format_exc())
+        return False
 
-def token_required(f):
-    """Decorator to protect routes with JWT authentication"""
-    @wraps(f)
-    def decorated(*args, **kwargs):
-        token = None
-        auth_header = request.headers.get('Authorization')
+def hash_password(password, salt=None):
+    """Hash password with salt using SHA-256"""
+    if salt is None:
+        salt = secrets.token_hex(16)
+    
+    # Combine password and salt, then hash
+    password_hash = hashlib.sha256((password + salt).encode()).hexdigest()
+    
+    # Return hash and salt
+    return password_hash, salt
+
+def validate_password(password, correct_hash, salt):
+    """Validate a password against a stored hash"""
+    password_hash, _ = hash_password(password, salt)
+    return password_hash == correct_hash
+
+def validate_email(email):
+    """Validate email format"""
+    email_pattern = r'^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$'
+    return bool(re.match(email_pattern, email))
+
+def validate_phone(phone):
+    """Validate phone number format"""
+    # Allow common phone formats with optional country codes
+    phone_pattern = r'^\+?[0-9]{7,15}$'
+    return bool(re.match(phone_pattern, phone))
+
+def register_user(db, username, email, password, phone=None):
+    """Register a new user with username, email, and password"""
+    # Validate inputs
+    if not username or not email or not password:
+        logger.warning("Registration failed: Missing required fields")
+        return False, "All fields are required"
+    
+    if not validate_email(email):
+        logger.warning(f"Registration failed: Invalid email format - {email}")
+        return False, "Invalid email format"
+    
+    if phone and not validate_phone(phone):
+        logger.warning(f"Registration failed: Invalid phone format - {phone}")
+        return False, "Invalid phone number format"
+    
+    if len(password) < 8:
+        logger.warning("Registration failed: Password too short")
+        return False, "Password must be at least 8 characters"
+    
+    # Check if username or email already exists
+    try:
+        users_collection = db['users']
+        existing_user = users_collection.find_one({"$or": [
+            {"username": username},
+            {"email": email}
+        ]})
         
-        if auth_header:
-            if auth_header.startswith('Bearer '):
-                token = auth_header.split(' ')[1]
+        if existing_user:
+            if existing_user.get('email') == email:
+                logger.warning(f"Registration failed: Email already exists - {email}")
+                return False, "Email already registered"
+            else:
+                logger.warning(f"Registration failed: Username already exists - {username}")
+                return False, "Username already taken"
         
-        if not token:
-            return jsonify({'message': 'Authentication token is missing'}), 401
+        # Hash password
+        password_hash, salt = hash_password(password)
+        
+        # Create new user
+        new_user = {
+            "username": username,
+            "email": email,
+            "password_hash": password_hash,
+            "password_salt": salt,
+            "phone": phone,
+            "created_at": datetime.now(),
+            "last_login": None,
+            "profile_picture": "",  # No picture for manual registration
+            "usage": {
+                "requests": 0,
+                "total_words": 0,
+                "monthly_words": 0,
+                "last_request": None
+            }
+        }
+        
+        # Insert user into database
+        result = users_collection.insert_one(new_user)
+        
+        if result.inserted_id:
+            logger.info(f"User registered successfully: {username}")
+            return True, "Registration successful"
+        else:
+            logger.error(f"Failed to insert new user: {username}")
+            return False, "Registration failed due to database error"
             
-        payload = decode_token(token)
-        if not payload:
-            return jsonify({'message': 'Invalid or expired token'}), 401
+    except Exception as e:
+        logger.error(f"Error during registration: {str(e)}")
+        logger.error(traceback.format_exc())
+        return False, "Registration failed: Internal error"
+
+def login_user(db, email_or_username, password):
+    """Login a user with email/username and password"""
+    try:
+        users_collection = db['users']
         
-        # Store user info in g for access in the route function
-        g.user_id = payload['sub']
-        g.account_type = payload['account_type']
+        # Find user by email or username
+        user = users_collection.find_one({
+            "$or": [
+                {"email": email_or_username},
+                {"username": email_or_username}
+            ]
+        })
         
-        return f(*args, **kwargs)
-    
-    return decorated
+        if not user:
+            logger.warning(f"Login failed: User not found - {email_or_username}")
+            return None, "Invalid email/username or password"
+        
+        # Validate password
+        if not validate_password(password, user['password_hash'], user['password_salt']):
+            logger.warning(f"Login failed: Invalid password for user - {email_or_username}")
+            return None, "Invalid email/username or password"
+        
+        # Update last login time
+        users_collection.update_one(
+            {"_id": user["_id"]},
+            {"$set": {"last_login": datetime.now()}}
+        )
+        
+        # Return user info
+        logger.info(f"User logged in successfully: {user['username']}")
+        return user, "Login successful"
+        
+    except Exception as e:
+        logger.error(f"Error during login: {str(e)}")
+        logger.error(traceback.format_exc())
+        return None, "Login failed: Internal error"
 
-def login_required_api(f):
-    """Decorator for Flask route that requires login"""
-    @wraps(f)
-    def decorated(*args, **kwargs):
-        if 'user_id' not in session:
-            return jsonify({'message': 'Login required'}), 401
-        return f(*args, **kwargs)
-    return decorated
-
-def register_user(username, password, email, account_type='free'):
-    """Register a new user"""
-    # Check if username already exists
-    if username in users_db:
-        return None  # Username already exists
-    
-    # Hash the password
-    hashed_password = generate_password_hash(password)
-    
-    # Create user entry
-    users_db[username] = {
-        'password': hashed_password,  # Store the hashed password
-        'email': email,
-        'plan': account_type.capitalize(),  # Capitalize for consistency
-        'joined_date': datetime.datetime.now().strftime('%Y-%m-%d'),
-        'words_used': 0,
-        'payment_status': 'Pending' if account_type.lower() != 'free' else 'N/A',
-        'api_keys': {
-            'gpt_zero': '',
-            'originality': ''
-        }
-    }
-    
-    # Return user info
-    return {
-        'user_id': username,
-        'username': username,
-        'email': email,
-        'account_type': account_type
-    }
-
-def authenticate_user(username, password):
-    """Authenticate a user with username and password"""
-    # Check if we have a demo user (from app.py)
-    if username == "demo" and password == "demo" and "demo" in users_db:
-        return {
-            'user_id': 'demo',
-            'username': 'demo',
-            'account_type': 'Basic'
-        }
-    
-    # Check if username exists
-    if username not in users_db:
+def get_user_by_id(db, user_id):
+    """Get user information by user ID"""
+    try:
+        users_collection = db['users']
+        user = users_collection.find_one({"username": user_id})
+        return user
+    except Exception as e:
+        logger.error(f"Error getting user: {str(e)}")
         return None
-    
-    # Get stored user data
-    user_data = users_db[username]
-    
-    # Check if password is stored as hash
-    if user_data['password'].startswith('pbkdf2:sha256:') or user_data['password'].startswith('scrypt:'):
-        # Verify hashed password
-        if check_password_hash(user_data['password'], password):
-            return {
-                'user_id': username,
-                'username': username,
-                'account_type': user_data['plan']
-            }
-    else:
-        # Plain text password (only for development!)
-        if user_data['password'] == password:
-            return {
-                'user_id': username,
-                'username': username,
-                'account_type': user_data['plan']
-            }
-    
-    # Admin fallback for testing
-    if username == "admin" and password == "admin":
-        return {
-            'user_id': 'admin_user',
-            'username': 'admin',
-            'account_type': 'admin'
-        }
-        
-    return None
 
-def logout_user(user_id):
-    """Logout a user (invalidate their session)"""
-    if user_id in active_sessions:
-        del active_sessions[user_id]
-    return True
+def update_user_password(db, user_id, current_password, new_password):
+    """Update user password"""
+    try:
+        users_collection = db['users']
+        user = users_collection.find_one({"username": user_id})
+        
+        if not user:
+            return False, "User not found"
+        
+        # Validate current password
+        if not validate_password(current_password, user['password_hash'], user['password_salt']):
+            return False, "Current password is incorrect"
+        
+        # Validate new password
+        if len(new_password) < 8:
+            return False, "New password must be at least 8 characters"
+        
+        # Hash new password
+        new_hash, new_salt = hash_password(new_password)
+        
+        # Update password
+        result = users_collection.update_one(
+            {"username": user_id},
+            {"$set": {
+                "password_hash": new_hash,
+                "password_salt": new_salt
+            }}
+        )
+        
+        if result.modified_count > 0:
+            return True, "Password updated successfully"
+        else:
+            return False, "Failed to update password"
+            
+    except Exception as e:
+        logger.error(f"Error updating password: {str(e)}")
+        return False, "Failed to update password: Internal error"
+
+def update_user_profile(db, user_id, email=None, phone=None):
+    """Update user profile information"""
+    try:
+        users_collection = db['users']
+        
+        # Build update document
+        update_doc = {}
+        
+        if email:
+            if not validate_email(email):
+                return False, "Invalid email format"
+                
+            # Check if email is already taken by another user
+            existing = users_collection.find_one({"email": email, "username": {"$ne": user_id}})
+            if existing:
+                return False, "Email is already registered to another account"
+                
+            update_doc["email"] = email
+            
+        if phone:
+            if not validate_phone(phone):
+                return False, "Invalid phone number format"
+            update_doc["phone"] = phone
+            
+        if not update_doc:
+            return False, "No changes provided"
+            
+        # Update user
+        result = users_collection.update_one(
+            {"username": user_id},
+            {"$set": update_doc}
+        )
+        
+        if result.modified_count > 0:
+            return True, "Profile updated successfully"
+        else:
+            return False, "No changes made"
+            
+    except Exception as e:
+        logger.error(f"Error updating profile: {str(e)}")
+        return False, "Failed to update profile: Internal error"
