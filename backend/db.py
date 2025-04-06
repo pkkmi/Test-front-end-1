@@ -1,169 +1,148 @@
+"""
+MongoDB database module for Andikar AI application.
+"""
+
 import os
-from pymongo import MongoClient
-from werkzeug.security import generate_password_hash, check_password_hash
 import logging
-import ssl
+from datetime import datetime
+from pymongo import MongoClient
+import traceback
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# Database configuration
-DB_URI = os.environ.get('MONGODB_URI', 'mongodb+srv://edgarmaina003:Andikar_25@oldtrafford.id96k.mongodb.net/?retryWrites=true&w=majority&appName=OldTrafford')
-DB_NAME = os.environ.get('DB_NAME', 'andikar_ai')
+# MongoDB connection
+MONGODB_URI = os.environ.get("MONGODB_URI")
 
-# Initialize MongoDB client with additional connection parameters for better compatibility
+if not MONGODB_URI:
+    logger.warning("MONGODB_URI environment variable not set. Database operations will fail.")
+
 try:
-    # Configure with ssl options to handle OpenSSL compatibility issues
-    client = MongoClient(
-        DB_URI,
-        ssl=True,
-        ssl_cert_reqs=ssl.CERT_NONE,  # Less strict certificate validation
-        connect=False,  # Defer connection until needed
-        serverSelectionTimeoutMS=5000,  # Timeout if connection fails
-        tlsAllowInvalidCertificates=True  # Allow less secure connections
-    )
-    db = client[DB_NAME]
-    users_collection = db['users']
-    transactions_collection = db['transactions']
-    logger.info(f"Connected to MongoDB: {DB_NAME}")
+    # Connect to MongoDB
+    client = MongoClient(MONGODB_URI)
+    db = client.get_database('andikar')  # Use andikar database
+    
+    # Test connection
+    db.command('ping')
+    logger.info("Successfully connected to MongoDB")
 except Exception as e:
-    logger.error(f"Error connecting to MongoDB: {str(e)}")
-    # Fallback to in-memory storage if MongoDB connection fails
-    users_collection = {}
-    transactions_collection = {}
+    logger.error(f"Failed to connect to MongoDB: {str(e)}")
+    logger.error(traceback.format_exc())
+    raise
 
 def init_db():
-    """Initialize the database with collections and demo data."""
+    """Initialize database - create collections and indexes if needed."""
     try:
-        # Create indexes for users collection
-        if isinstance(users_collection, dict):
-            logger.warning("Using in-memory storage instead of MongoDB")
-            return
-            
-        # Create unique index on username
-        users_collection.create_index("username", unique=True)
+        # Create collections if they don't exist
+        if 'users' not in db.list_collection_names():
+            db.create_collection('users')
+            logger.info("Created users collection")
         
-        # Add demo user if it doesn't exist
-        if users_collection.count_documents({"username": "demo"}) == 0:
-            users_collection.insert_one({
-                "username": "demo",
-                "password": generate_password_hash("demo"),
-                "email": "demo@example.com",
-                "usage": {
-                    "requests": 0,
-                    "total_words": 0,
-                    "last_request": None
-                }
-            })
-            logger.info("Added demo user to database")
+        # Create indexes
+        db.users.create_index("username", unique=True)
+        db.users.create_index("email", unique=True)
+        db.users.create_index("phone", sparse=True)
+        
+        logger.info("Database initialized successfully")
+        return True
     except Exception as e:
         logger.error(f"Error initializing database: {str(e)}")
+        logger.error(traceback.format_exc())
+        return False
 
-def add_user(username, password, email):
+def add_user(username, email, password_hash):
     """Add a new user to the database."""
     try:
-        if isinstance(users_collection, dict):
-            # In-memory fallback
-            if username in users_collection:
-                return False, "Username already exists"
-            users_collection[username] = {
-                "username": username,
-                "password": generate_password_hash(password),
-                "email": email,
-                "usage": {
-                    "requests": 0,
-                    "total_words": 0,
-                    "last_request": None
-                }
-            }
-            return True, "User created successfully"
+        # Check if user already exists
+        existing_user = db.users.find_one({
+            "$or": [
+                {"username": username},
+                {"email": email}
+            ]
+        })
         
-        # MongoDB implementation
-        user_data = {
+        if existing_user:
+            logger.warning(f"User already exists: {username}")
+            return False
+        
+        # Create new user document
+        user = {
             "username": username,
-            "password": generate_password_hash(password),
             "email": email,
+            "password_hash": password_hash,
+            "created_at": datetime.now(),
             "usage": {
                 "requests": 0,
                 "total_words": 0,
+                "monthly_words": 0,
                 "last_request": None
             }
         }
         
-        result = users_collection.insert_one(user_data)
-        if result.inserted_id:
-            return True, "User created successfully"
-        return False, "Failed to create user"
+        # Insert user into database
+        result = db.users.insert_one(user)
+        
+        logger.info(f"User created successfully: {username}")
+        return bool(result.inserted_id)
     except Exception as e:
         logger.error(f"Error adding user: {str(e)}")
-        return False, str(e)
+        logger.error(traceback.format_exc())
+        return False
+
+def verify_user(username, password_hash):
+    """Verify user credentials."""
+    try:
+        # Find user by username
+        user = db.users.find_one({"username": username})
+        
+        if not user:
+            logger.warning(f"User not found: {username}")
+            return False
+        
+        # Verify password
+        return user.get('password_hash') == password_hash
+    except Exception as e:
+        logger.error(f"Error verifying user: {str(e)}")
+        logger.error(traceback.format_exc())
+        return False
 
 def get_user(username):
-    """Get a user by username."""
+    """Get user information by username."""
     try:
-        if isinstance(users_collection, dict):
-            # In-memory fallback
-            return users_collection.get(username)
+        # Find user by username
+        user = db.users.find_one({"username": username})
         
-        # MongoDB implementation
-        user = users_collection.find_one({"username": username})
+        if not user:
+            logger.warning(f"User not found: {username}")
+            return None
+        
         return user
     except Exception as e:
         logger.error(f"Error getting user: {str(e)}")
+        logger.error(traceback.format_exc())
         return None
 
-def verify_user(username, password):
-    """Verify a user's credentials."""
+def update_user_usage(username, word_count):
+    """Update user usage statistics."""
     try:
-        user = get_user(username)
-        if not user:
-            return False, "User not found"
-        
-        if isinstance(users_collection, dict):
-            # In-memory fallback
-            if check_password_hash(user["password"], password):
-                return True, user
-            return False, "Invalid password"
-        
-        # MongoDB implementation
-        if check_password_hash(user["password"], password):
-            return True, user
-        return False, "Invalid password"
-    except Exception as e:
-        logger.error(f"Error verifying user: {str(e)}")
-        return False, str(e)
-
-def update_user_usage(username, words_processed):
-    """Update a user's usage statistics."""
-    try:
-        if isinstance(users_collection, dict):
-            # In-memory fallback
-            if username not in users_collection:
-                return False, "User not found"
-            
-            user = users_collection[username]
-            user["usage"]["requests"] += 1
-            user["usage"]["total_words"] += words_processed
-            user["usage"]["last_request"] = "now"  # Simplified for in-memory
-            return True, "Usage updated"
-        
-        # MongoDB implementation
-        from datetime import datetime
-        result = users_collection.update_one(
+        # Update usage statistics
+        result = db.users.update_one(
             {"username": username},
-            {"$inc": {
-                "usage.requests": 1,
-                "usage.total_words": words_processed
-            },
-            "$set": {
-                "usage.last_request": datetime.now()
-            }}
+            {
+                "$inc": {
+                    "usage.requests": 1,
+                    "usage.total_words": word_count,
+                    "usage.monthly_words": word_count
+                },
+                "$set": {
+                    "usage.last_request": datetime.now()
+                }
+            }
         )
         
-        if result.modified_count:
-            return True, "Usage updated"
-        return False, "Failed to update usage"
+        return result.modified_count > 0
     except Exception as e:
         logger.error(f"Error updating user usage: {str(e)}")
-        return False, str(e)
+        logger.error(traceback.format_exc())
+        return False
